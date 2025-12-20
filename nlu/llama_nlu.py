@@ -11,13 +11,11 @@ from transformers import (
     Pipeline,
     PreTrainedTokenizer
 )
-# Local Imports
 from schemas import NLUResult, Entities
 from llama_prompt import SYSTEM_PROMPT
-from validator import validate_nlu_result  
+from validator import validate_nlu_result 
 
 # --- AUTHENTICATION ---
-# Ensure your token is valid or set as environment variable
 HF_TOKEN = "" 
 login(token=HF_TOKEN)
 
@@ -28,11 +26,9 @@ _global_tokenizer: Optional[PreTrainedTokenizer] = None
 def load_resources() -> Tuple[Pipeline, PreTrainedTokenizer]:
     global _global_pipeline, _global_tokenizer
     
-    # 1. Thread-safe local reference
     current_pipeline = _global_pipeline
     current_tokenizer = _global_tokenizer
 
-    # 2. Return cached if available
     if current_pipeline is not None and current_tokenizer is not None:
         return current_pipeline, current_tokenizer
 
@@ -40,7 +36,6 @@ def load_resources() -> Tuple[Pipeline, PreTrainedTokenizer]:
     
     model_id = "meta-llama/Meta-Llama-3.1-8B-Instruct"
 
-    # Configuration for 4-bit quantization (Speed & Memory Efficiency)
     bnb_config = BitsAndBytesConfig(
         load_in_4bit=True,
         bnb_4bit_quant_type="nf4",
@@ -48,11 +43,9 @@ def load_resources() -> Tuple[Pipeline, PreTrainedTokenizer]:
         bnb_4bit_use_double_quant=True,
     )
 
-    # Load Tokenizer
     tokenizer = AutoTokenizer.from_pretrained(model_id, token=HF_TOKEN)
     tokenizer.pad_token = tokenizer.eos_token
 
-    # Load Model
     model = AutoModelForCausalLM.from_pretrained(
         model_id,
         quantization_config=bnb_config,
@@ -61,42 +54,52 @@ def load_resources() -> Tuple[Pipeline, PreTrainedTokenizer]:
         token=HF_TOKEN
     )
 
-    # Create Pipeline with STRICT GENERATION SETTINGS
+    # --- PRODUCTION GENERATION SETTINGS ---
     text_generator = pipeline(
         "text-generation",
         model=model,
         tokenizer=tokenizer,
-        max_new_tokens=300,
-        # CRITICAL FOR LOGIC:
-        do_sample=False,       # Deterministic mode (Greedy Decoding)
-        temperature=None,      # Disabled because we are not sampling
-        top_p=None,            # Disabled because we are not sampling
+        max_new_tokens=1024,
+        do_sample=True,        
+        temperature=0.1,       
+        top_p=0.9,             
+        repetition_penalty=1.0,
+        pad_token_id=tokenizer.eos_token_id,
+        eos_token_id=tokenizer.eos_token_id,
         return_full_text=False
     )
     
-    # Update globals
     _global_pipeline = text_generator
     _global_tokenizer = tokenizer
     
     print("Model Loaded Successfully!")
-    
     return text_generator, tokenizer
 
 def _clean_json_output(text: str) -> str:
-    """
-    Robust JSON extraction: finds the first { and last } to ignore extra text.
-    """
+    """Robust extraction of the main JSON block."""
     text = text.strip()
-    # DOTALL allows matching across newlines
-    match = re.search(r"(\{.*\})", text, re.DOTALL)
-    if match:
-        return match.group(1)
-    return text
+    start_idx = text.find('{')
+    if start_idx == -1: return text 
+    
+    # Try to find the last '}', but if missing, take everything
+    end_idx = text.rfind('}')
+    if end_idx == -1: return text[start_idx:] 
+    return text[start_idx : end_idx + 1]
+
+def _repair_json_string(json_str: str) -> str:
+    """Smart Repair for missing commas."""
+    # 1. Add missing comma after STRING value -> next key
+    json_str = re.sub(r'"\s+"(\w+)":', r'", "\1":', json_str)
+
+    # 2. Add missing comma after NUMBER/BOOL value -> next key
+    json_str = re.sub(r'(\d+|true|false|null)\s+"(\w+)":', r'\1, "\2":', json_str)
+    
+    # 3. Add missing comma inside string lists
+    json_str = re.sub(r'"\s+"', '", "', json_str)
+    
+    return json_str
 
 def llama_nlu(text: str) -> NLUResult:
-    """
-    Main Entry Point: Takes text, runs LLM, parses JSON, and Validates Logic.
-    """
     generator, tokenizer = load_resources()
 
     messages = [
@@ -104,7 +107,6 @@ def llama_nlu(text: str) -> NLUResult:
         {"role": "user", "content": text},
     ]
     
-    # Apply Chat Template
     prompt = cast(str, tokenizer.apply_chat_template(
         messages, 
         tokenize=False, 
@@ -112,49 +114,50 @@ def llama_nlu(text: str) -> NLUResult:
     ))
 
     try:
-        # Generate Response
         raw_result = generator(prompt)
-        
-        # Parse Output
         outputs = cast(List[Dict[str, Any]], raw_result)
         raw_output = str(outputs[0]["generated_text"])
         
-        # Clean JSON string
         json_str = _clean_json_output(raw_output)
-        data = json.loads(json_str)
         
-        # Pydantic Parsing (Handles Type Conversion safely)
+        # --- SMART PARSING LOGIC ---
+        data = None
+        
+        # Step 1: Fix Commas
+        repaired_str = _repair_json_string(json_str)
+        
+        # Step 2: Smart Closure Loop
+        # Attempts to fix cutoff JSON by trying different endings
+        attempts = ["", "}", "}}", "}}}", '"}', '"}}', '"]}', '"]}}']
+        
+        for suffix in attempts:
+            try:
+                data = json.loads(repaired_str + suffix)
+                break # Success!
+            except json.JSONDecodeError:
+                continue # Try next suffix
+        
+        if data is None:
+            print(f"\n JSON CRASH (Unfixable). Full Output:\n{raw_output}\n")
+            return NLUResult(intent="clarification", confidence=0.0, entities=Entities(), needs_clarification=True)
+
         entities_data = data.get("entities", {}) or {}
         entities_obj = Entities(**entities_data)
 
-        # Initial Result Construction
         result = NLUResult(
             intent=data.get("intent", "unknown"),
             confidence=float(data.get("confidence", 0.0)),
             entities=entities_obj,
             needs_clarification=data.get("needs_clarification", False)
         )
+        
+        # Inject raw user text for QA to ensure exact Arabic match
+        if result.intent == "document_qa":
+            result.entities.question = text
 
-        # --- STEP 2: LOGIC VALIDATION ---
-        # "Did the AI forget a required field?"
         final_result = validate_nlu_result(result)
-
         return final_result
 
-    except json.JSONDecodeError:
-        print(f"JSON Error. Output was: {raw_output[:100]}...")
-        # Fail safe to clarification
-        return NLUResult(
-            intent="clarification", 
-            confidence=0.0, 
-            entities=Entities(), 
-            needs_clarification=True
-        )
     except Exception as e:
-        print(f"Error: {e}")
-        # Fail safe to unknown
-        return NLUResult(
-            intent="unknown", 
-            confidence=0.0, 
-            entities=Entities()
-        )
+        print(f"Error processing NLU: {e}")
+        return NLUResult(intent="clarification", confidence=0.0, entities=Entities(), needs_clarification=True)

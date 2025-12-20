@@ -29,12 +29,11 @@ def validate_nlu_result(result: NLUResult) -> NLUResult:
 
     # 3. ENFORCE RULES
     if missing_keys:
-        print(f"⚠️ VALIDATOR: Intent '{result.intent}' missing required fields {missing_keys}. Forcing Clarification.")
+        print(f"VALIDATOR: Intent '{result.intent}' missing required fields {missing_keys}. Forcing Clarification.")
         
         # Force the system to ask for clarification
         result.needs_clarification = True
         result.confidence = 0.5 # Downgrade confidence
-        # Optionally, you could switch intent to 'clarification', 
-        # but keeping the original intent allows the UI to say "Which file did you mean to open?"
+    
         
     return result

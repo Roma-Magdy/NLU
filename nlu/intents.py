@@ -6,7 +6,7 @@ class IntentDef:
         name: str, 
         description: str, 
         entities: Dict[str, str],
-        required_entities: List[str], # <--- REFINEMENT: Explicit Validation Contract
+        required_entities: List[str],
         rules: List[str], 
         examples: List[Dict[str, str]]
     ):
@@ -51,6 +51,7 @@ MASTER_INTENTS = [
         ],
         examples=[
             {"user": "دورلي على book بيتكلم عن Neural Networks", "json": '{"intent": "search_file", "confidence": 0.9, "entities": {"search_query": "Neural Networks", "file_types": ["pdf"]}}'},
+            {"user": "هاتلي الـ slides بتاعة المحاضرة اللي فاتت", "json": '{"intent": "search_file", "confidence": 0.95, "entities": {"search_query": "المحاضرة اللي فاتت", "file_types": ["pptx", "pdf"]}}'},
             {"user": "عايز محاضرات الـ History", "json": '{"intent": "search_file", "confidence": 0.95, "entities": {"search_query": "History", "file_types": ["pptx", "pdf"]}}'},
             {"user": "شوفلي اي presentation عن الـ ML basics بس تكون pptx", "json": '{"intent": "search_file", "confidence": 0.95, "entities": {"search_query": "ML basics", "file_types": ["pptx"]}}'}
         ]
@@ -90,14 +91,16 @@ MASTER_INTENTS = [
             {"user": "خلاص كفاية صدعتني", "json": '{"intent": "read_document", "confidence": 0.95, "entities": {"reading_action": "stop"}}'}
         ]
     ),
-    IntentDef(
+IntentDef(
         name="document_qa",
         description="Ask specific questions about the content.",
-        entities={"question": "The full question text."},
+        entities={"question": "The exact question text extracted from the user input."},
         required_entities=["question"],
         rules=[
             "Triggers: 'Explain', 'What is', 'Define', 'Meaning of', 'يعني ايه', 'ما هو'.",
-            "Capture the full sentence."
+            "EXTRACT the question exactly as spoken.", 
+            "DO NOT rephrase. DO NOT translate. DO NOT summarize.",
+            "Example: 'Explain the diagram please' -> question='Explain the diagram please'"
         ],
         examples=[
             {"user": "Explain the diagram on page 20", "json": '{"intent": "document_qa", "confidence": 1.0, "entities": {"question": "Explain the diagram on page 20", "page_number": 20}}'},
